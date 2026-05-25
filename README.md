@@ -63,9 +63,10 @@ goqual mutate internal/app/app.go --fail-on-survived
 goqual mutate internal/app/app.go --fail-on-uncovered
 ```
 
-Commands can be run from a module subdirectory. `goqual` resolves source files
-and filters from the current directory, then runs coverage, tests, and sidecar
-manifest writes from the module root.
+Commands can be run from a module subdirectory. Source files can be passed as
+current-directory-relative paths like `foo.go` or module-root-relative paths
+like `internal/app/app.go`. `goqual` runs coverage, tests, and sidecar manifest
+writes from the module root.
 
 Use custom storage paths:
 

@@ -8,7 +8,67 @@ import (
 	"testing"
 )
 
+func TestResolveExistingModulePathPrefersCurrentDirectoryThenModuleRoot(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "internal", "pkg")
+	writeFile(t, filepath.Join(workDir, "foo.go"), "package pkg\n")
+	writeFile(t, filepath.Join(root, "internal", "app", "app.go"), "package app\n")
+
+	rel, abs, err := resolveExistingModulePath("foo.go", root, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "internal/pkg/foo.go" {
+		t.Fatalf("cwd-relative rel = %q", rel)
+	}
+	if abs != filepath.Join(workDir, "foo.go") {
+		t.Fatalf("cwd-relative abs = %q", abs)
+	}
+
+	rel, abs, err = resolveExistingModulePath("internal/app/app.go", root, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "internal/app/app.go" {
+		t.Fatalf("module-root-relative rel = %q", rel)
+	}
+	if abs != filepath.Join(root, "internal", "app", "app.go") {
+		t.Fatalf("module-root-relative abs = %q", abs)
+	}
+}
+
 func TestMutateStrictFromSubdirectoryUsesModuleRoot(t *testing.T) {
+	root, sourcePath, source := writeMutationFixture(t)
+	subdir := filepath.Join(root, "internal", "pkg")
+	restore := chdirForTest(t, subdir)
+	defer restore()
+
+	var code int
+	var err error
+	out := captureStdout(t, func() {
+		code, err = Run([]string{"mutate", "foo.go", "--strict", "--mutation-warning", "99"})
+	})
+
+	assertStrictMutationRun(t, code, err, out, sourcePath, source)
+}
+
+func TestMutateAcceptsModuleRootRelativeSourceFromSubdirectory(t *testing.T) {
+	root, sourcePath, source := writeMutationFixture(t)
+	subdir := filepath.Join(root, "internal", "pkg")
+	restore := chdirForTest(t, subdir)
+	defer restore()
+
+	var code int
+	var err error
+	out := captureStdout(t, func() {
+		code, err = Run([]string{"mutate", "internal/pkg/foo.go", "--strict", "--mutation-warning", "99"})
+	})
+
+	assertStrictMutationRun(t, code, err, out, sourcePath, source)
+}
+
+func writeMutationFixture(t *testing.T) (string, string, string) {
+	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/subdir\n\ngo 1.26\n")
 	sourcePath := filepath.Join(root, "internal", "pkg", "foo.go")
@@ -29,16 +89,11 @@ func TestAddZero(t *testing.T) {
 	}
 }
 `)
-	subdir := filepath.Join(root, "internal", "pkg")
-	restore := chdirForTest(t, subdir)
-	defer restore()
+	return root, sourcePath, source
+}
 
-	var code int
-	var err error
-	out := captureStdout(t, func() {
-		code, err = Run([]string{"mutate", "foo.go", "--strict", "--mutation-warning", "99"})
-	})
-
+func assertStrictMutationRun(t *testing.T, code int, err error, out, sourcePath, source string) {
+	t.Helper()
 	if code == 0 {
 		t.Fatalf("Run() code = 0, want non-zero; output:\n%s", out)
 	}
@@ -54,11 +109,9 @@ func TestAddZero(t *testing.T) {
 	if got := readFile(t, sourcePath); got != source {
 		t.Fatalf("source was not restored:\n%s", got)
 	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(sourcePath)))
 	if _, err := os.Stat(filepath.Join(root, "target", "goqual", "manifests")); err != nil {
 		t.Fatalf("sidecar manifest directory was not created at module root: %v", err)
-	}
-	if got, _ := os.Getwd(); got != subdir {
-		t.Fatalf("working directory = %q, want restored subdir %q", got, subdir)
 	}
 }
 

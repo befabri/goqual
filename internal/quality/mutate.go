@@ -147,25 +147,15 @@ func parseMutateArgs(args []string, root, workDir string) (mutateOptions, bool, 
 			if options.SourcePath != "" {
 				return options, true, fmt.Errorf("unexpected extra argument: %s", arg)
 			}
-			sourcePath, _, err := resolveModulePath(arg, root, workDir)
+			sourcePath, _, err := resolveExistingModulePath(arg, root, workDir)
 			if err != nil {
-				return options, true, err
+				return options, true, fmt.Errorf("source file not found: %s", arg)
 			}
 			options.SourcePath = sourcePath
 		}
 	}
 	if options.SourcePath == "" {
 		return options, true, fmt.Errorf("missing source file argument")
-	}
-	if _, err := os.Stat(options.SourcePath); err != nil {
-		sourcePath, absPath, pathErr := resolveModulePath(options.SourcePath, root, root)
-		if pathErr != nil {
-			return options, true, pathErr
-		}
-		if _, statErr := os.Stat(absPath); statErr != nil {
-			return options, true, fmt.Errorf("source file not found: %s", sourcePath)
-		}
-		options.SourcePath = sourcePath
 	}
 	options.CoverageProfile = resolveOptionalPath(options.CoverageProfile, root, workDir, options.coverageUser)
 	options.ManifestDir = resolveOptionalPath(options.ManifestDir, root, workDir, options.manifestUser)

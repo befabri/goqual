@@ -60,6 +60,44 @@ func resolveModulePath(path, root, workDir string) (string, string, error) {
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(workDir, path)
 	}
+	return moduleRelFromAbs(path, abs, root)
+}
+
+func resolveExistingModulePath(path, root, workDir string) (string, string, error) {
+	if filepath.IsAbs(path) {
+		rel, abs, err := moduleRelFromAbs(path, path, root)
+		if err != nil {
+			return "", "", err
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", "", err
+		}
+		return rel, abs, nil
+	}
+
+	var firstMissing error
+	for _, base := range []string{workDir, root} {
+		candidate := filepath.Join(base, path)
+		rel, abs, err := moduleRelFromAbs(path, candidate, root)
+		if err != nil {
+			if firstMissing == nil {
+				firstMissing = err
+			}
+			continue
+		}
+		if _, err := os.Stat(abs); err == nil {
+			return rel, abs, nil
+		} else if firstMissing == nil {
+			firstMissing = err
+		}
+	}
+	if firstMissing == nil {
+		firstMissing = os.ErrNotExist
+	}
+	return "", "", firstMissing
+}
+
+func moduleRelFromAbs(displayPath, abs, root string) (string, string, error) {
 	abs, err := filepath.Abs(abs)
 	if err != nil {
 		return "", "", err
@@ -69,7 +107,7 @@ func resolveModulePath(path, root, workDir string) (string, string, error) {
 		return "", "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", "", errOutsideModule(path)
+		return "", "", errOutsideModule(displayPath)
 	}
 	return filepath.ToSlash(rel), abs, nil
 }
