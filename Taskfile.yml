@@ -1,0 +1,32 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  test:
+    desc: Run all Go tests
+    cmds:
+      - go test ./...
+
+  build:
+    desc: Build goqual
+    cmds:
+      - go build -o bin/goqual ./cmd/goqual
+
+  install:
+    desc: Install goqual into GOPATH/bin
+    cmds:
+      - go install ./cmd/goqual
+
+  crap:
+    desc: Run goqual CRAP report on itself
+    cmds:
+      - go run ./cmd/goqual crap {{.CLI_ARGS}}
+
+  mutate:
+    desc: Run goqual mutation command; pass args after --
+    cmds:
+      - go run ./cmd/goqual mutate {{.CLI_ARGS}}
