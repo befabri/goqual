@@ -55,6 +55,18 @@ Run mutation testing:
 goqual mutate internal/app/app.go --max-workers 3
 ```
 
+Fail the command when mutation testing finds survivors or uncovered mutations:
+
+```sh
+goqual mutate internal/app/app.go --strict
+goqual mutate internal/app/app.go --fail-on-survived
+goqual mutate internal/app/app.go --fail-on-uncovered
+```
+
+Commands can be run from a module subdirectory. `goqual` resolves source files
+and filters from the current directory, then runs coverage, tests, and sidecar
+manifest writes from the module root.
+
 Use custom storage paths:
 
 ```sh
@@ -72,6 +84,9 @@ goqual mutate internal/app/app.go \
 --lines L1,L2,...
 --since-last-run
 --mutate-all
+--strict
+--fail-on-survived
+--fail-on-uncovered
 --mutation-warning N
 --timeout-factor N
 --test-command COMMAND

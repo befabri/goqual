@@ -34,6 +34,9 @@ Options:
   --lines L1,L2,...        Run only mutations on these source lines
   --since-last-run         Run only mutations in functions changed since manifest
   --mutate-all             Run all covered mutations even when a manifest exists
+  --strict                 Fail if any mutation survives or is uncovered
+  --fail-on-survived       Fail if any selected mutation survives
+  --fail-on-uncovered      Fail if any mutation is uncovered
   --mutation-warning N     Warn when more than N mutations are found (default 50)
   --timeout-factor N       Mutation timeout multiplier vs baseline (default 10)
   --test-command COMMAND   Test command (default "go test ./...")
@@ -54,11 +57,15 @@ type mutateOptions struct {
 	Lines           map[int]bool
 	SinceLastRun    bool
 	MutateAll       bool
+	FailOnSurvived  bool
+	FailOnUncovered bool
 	MutationWarning int
 	TimeoutFactor   int
 	TestCommand     string
 	CoverageProfile string
+	coverageUser    bool
 	ManifestDir     string
+	manifestUser    bool
 	MaxWorkers      int
 	Verbose         bool
 }
@@ -70,7 +77,11 @@ type mutationResult struct {
 }
 
 func runMutate(args []string) (int, error) {
-	options, ok, err := parseMutateArgs(args)
+	root, workDir, err := moduleRoot()
+	if err != nil {
+		return 1, err
+	}
+	options, ok, err := parseMutateArgs(args, root, workDir)
 	if err != nil {
 		return 1, err
 	}
@@ -78,13 +89,18 @@ func runMutate(args []string) (int, error) {
 		fmt.Println(mutateHelp)
 		return 0, nil
 	}
+	restore, err := chdirTemporarily(root)
+	if err != nil {
+		return 1, err
+	}
+	defer restore()
 	if err := runMutationCommand(options); err != nil {
 		return 1, err
 	}
 	return 0, nil
 }
 
-func parseMutateArgs(args []string) (mutateOptions, bool, error) {
+func parseMutateArgs(args []string, root, workDir string) (mutateOptions, bool, error) {
 	options := mutateOptions{
 		MutationWarning: 50,
 		TimeoutFactor:   10,
@@ -109,6 +125,13 @@ func parseMutateArgs(args []string) (mutateOptions, bool, error) {
 			options.SinceLastRun = true
 		case "--mutate-all":
 			options.MutateAll = true
+		case "--strict":
+			options.FailOnSurvived = true
+			options.FailOnUncovered = true
+		case "--fail-on-survived":
+			options.FailOnSurvived = true
+		case "--fail-on-uncovered":
+			options.FailOnUncovered = true
 		case "--lines", "--mutation-warning", "--timeout-factor", "--test-command", "--coverage-profile", "--manifest-dir", "--max-workers":
 			if i+1 >= len(args) {
 				return options, true, fmt.Errorf("%s requires a value", arg)
@@ -124,7 +147,7 @@ func parseMutateArgs(args []string) (mutateOptions, bool, error) {
 			if options.SourcePath != "" {
 				return options, true, fmt.Errorf("unexpected extra argument: %s", arg)
 			}
-			sourcePath, err := normalizeSourcePath(arg)
+			sourcePath, _, err := resolveModulePath(arg, root, workDir)
 			if err != nil {
 				return options, true, err
 			}
@@ -135,12 +158,21 @@ func parseMutateArgs(args []string) (mutateOptions, bool, error) {
 		return options, true, fmt.Errorf("missing source file argument")
 	}
 	if _, err := os.Stat(options.SourcePath); err != nil {
-		return options, true, fmt.Errorf("source file not found: %s", options.SourcePath)
+		sourcePath, absPath, pathErr := resolveModulePath(options.SourcePath, root, root)
+		if pathErr != nil {
+			return options, true, pathErr
+		}
+		if _, statErr := os.Stat(absPath); statErr != nil {
+			return options, true, fmt.Errorf("source file not found: %s", sourcePath)
+		}
+		options.SourcePath = sourcePath
 	}
-	if options.Scan && (options.UpdateManifest || options.Lines != nil || options.SinceLastRun || options.MutateAll || options.ReuseCoverage) {
+	options.CoverageProfile = resolveOptionalPath(options.CoverageProfile, root, workDir, options.coverageUser)
+	options.ManifestDir = resolveOptionalPath(options.ManifestDir, root, workDir, options.manifestUser)
+	if options.Scan && (options.UpdateManifest || options.Lines != nil || options.SinceLastRun || options.MutateAll || options.ReuseCoverage || options.FailOnSurvived || options.FailOnUncovered) {
 		return options, true, fmt.Errorf("cannot combine --scan with mutation execution options")
 	}
-	if options.UpdateManifest && (options.Lines != nil || options.SinceLastRun || options.MutateAll || options.ReuseCoverage) {
+	if options.UpdateManifest && (options.Lines != nil || options.SinceLastRun || options.MutateAll || options.ReuseCoverage || options.FailOnSurvived || options.FailOnUncovered) {
 		return options, true, fmt.Errorf("cannot combine --update-manifest with mutation execution options")
 	}
 	if options.SinceLastRun && (options.Lines != nil || options.MutateAll) {
@@ -179,11 +211,13 @@ func consumeMutateValue(options *mutateOptions, name, value string) error {
 			return fmt.Errorf("--coverage-profile requires a path")
 		}
 		options.CoverageProfile = value
+		options.coverageUser = true
 	case "--manifest-dir":
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("--manifest-dir requires a path")
 		}
 		options.ManifestDir = value
+		options.manifestUser = true
 	case "--max-workers":
 		n, err := parsePositiveInt(value, name)
 		if err != nil {
@@ -212,22 +246,6 @@ func parsePositiveInt(value, name string) (int, error) {
 		return 0, fmt.Errorf("%s requires a positive integer", name)
 	}
 	return n, nil
-}
-
-func normalizeSourcePath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(wd, abs)
-	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel) {
-		return filepath.ToSlash(rel), nil
-	}
-	return filepath.Clean(path), nil
 }
 
 func runMutationCommand(options mutateOptions) error {
@@ -360,12 +378,12 @@ func mutate(options mutateOptions, store manifest.Store) error {
 	if err := os.WriteFile(options.SourcePath, []byte(clean), 0o644); err != nil {
 		return err
 	}
-	summarizeMutations(results, uncovered)
+	summary := summarizeMutations(results, uncovered)
 	if err := store.Save(options.SourcePath, current); err != nil {
 		return err
 	}
 	fmt.Println("Updated manifest: " + store.Path(options.SourcePath))
-	return nil
+	return enforceMutationGate(options, summary)
 }
 
 func readCleanSource(sourcePath string) (string, string, error) {
@@ -704,18 +722,29 @@ func printUncovered(sites []mutations.Site) {
 	}
 }
 
-func summarizeMutations(results []mutationResult, uncovered []mutations.Site) {
+type mutationSummary struct {
+	Killed    int
+	Survived  int
+	Uncovered int
+}
+
+func summarizeMutations(results []mutationResult, uncovered []mutations.Site) mutationSummary {
 	counts := map[string]int{}
 	for _, result := range results {
 		counts[result.Status]++
 	}
+	summary := mutationSummary{
+		Killed:    counts["killed"] + counts["timeout"],
+		Survived:  counts["survived"],
+		Uncovered: len(uncovered),
+	}
 	fmt.Println()
 	fmt.Println("Mutation Report")
 	fmt.Println("===============")
-	fmt.Printf("Killed: %d\n", counts["killed"]+counts["timeout"])
-	fmt.Printf("Survived: %d\n", counts["survived"])
-	fmt.Printf("Uncovered: %d\n", len(uncovered))
-	if counts["survived"] > 0 {
+	fmt.Printf("Killed: %d\n", summary.Killed)
+	fmt.Printf("Survived: %d\n", summary.Survived)
+	fmt.Printf("Uncovered: %d\n", summary.Uncovered)
+	if summary.Survived > 0 {
 		fmt.Println()
 		fmt.Println("Survivors:")
 		for _, result := range results {
@@ -724,6 +753,43 @@ func summarizeMutations(results []mutationResult, uncovered []mutations.Site) {
 			}
 		}
 	}
+	return summary
+}
+
+func enforceMutationGate(options mutateOptions, summary mutationSummary) error {
+	failSurvived := options.FailOnSurvived && summary.Survived > 0
+	failUncovered := options.FailOnUncovered && summary.Uncovered > 0
+	if !failSurvived && !failUncovered {
+		return nil
+	}
+	return mutationGateError{
+		Summary:       summary,
+		FailSurvived:  failSurvived,
+		FailUncovered: failUncovered,
+		RequireStrict: options.FailOnSurvived && options.FailOnUncovered,
+	}
+}
+
+type mutationGateError struct {
+	Summary       mutationSummary
+	FailSurvived  bool
+	FailUncovered bool
+	RequireStrict bool
+}
+
+func (e mutationGateError) Error() string {
+	var reasons []string
+	if e.FailSurvived {
+		reasons = append(reasons, fmt.Sprintf("survived=%d", e.Summary.Survived))
+	}
+	if e.FailUncovered {
+		reasons = append(reasons, fmt.Sprintf("uncovered=%d", e.Summary.Uncovered))
+	}
+	mode := "mutation quality gate failed"
+	if e.RequireStrict {
+		mode = "strict mutation quality gate failed"
+	}
+	return mode + ": " + strings.Join(reasons, " ")
 }
 
 func sendFirstError(errs chan<- error, err error) {

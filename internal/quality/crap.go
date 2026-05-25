@@ -38,12 +38,17 @@ Arguments:
 type crapOptions struct {
 	Filters         []string
 	CoverageProfile string
+	coverageUser    bool
 	ReuseCoverage   bool
 	MaxWorkers      int
 	TestCommand     string
 }
 
 func runCRAP(args []string) (int, error) {
+	root, workDir, err := moduleRoot()
+	if err != nil {
+		return 1, err
+	}
 	options, ok, err := parseCRAPArgs(args)
 	if err != nil {
 		return 1, err
@@ -52,6 +57,15 @@ func runCRAP(args []string) (int, error) {
 		fmt.Println(crapHelp)
 		return 0, nil
 	}
+	for i, filter := range options.Filters {
+		options.Filters[i] = normalizeFilter(filter, root, workDir)
+	}
+	options.CoverageProfile = resolveOptionalPath(options.CoverageProfile, root, workDir, options.coverageUser)
+	restore, err := chdirTemporarily(root)
+	if err != nil {
+		return 1, err
+	}
+	defer restore()
 	if err := runCRAPReport(options); err != nil {
 		return 1, err
 	}
@@ -83,6 +97,7 @@ func parseCRAPArgs(args []string) (crapOptions, bool, error) {
 					return options, true, fmt.Errorf("--coverage-profile requires a path")
 				}
 				options.CoverageProfile = value
+				options.coverageUser = true
 			case "--max-workers":
 				workers, err := strconv.Atoi(value)
 				if err != nil || workers < 1 {
