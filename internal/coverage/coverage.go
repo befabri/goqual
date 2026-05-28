@@ -33,6 +33,12 @@ func LoadProfile(path string) (map[string][]Segment, error) {
 
 func ParseProfile(r io.Reader) (map[string][]Segment, error) {
 	out := map[string][]Segment{}
+	// index maps a block's position to its slot in out[file]. A -coverpkg run
+	// (or any merged profile) lists the same block once per test binary, so
+	// duplicates are merged here keeping the max count: a block is covered if
+	// any binary executed it. Without this the repeated copies inflate the
+	// statement denominator and coverage reads far below the truth.
+	index := map[string]int{}
 	scanner := bufio.NewScanner(r)
 	lineNumber := 0
 	for scanner.Scan() {
@@ -45,9 +51,21 @@ func ParseProfile(r io.Reader) (map[string][]Segment, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNumber, err)
 		}
+		key := blockKey(segment)
+		if i, ok := index[key]; ok {
+			if segment.Count > out[segment.File][i].Count {
+				out[segment.File][i].Count = segment.Count
+			}
+			continue
+		}
+		index[key] = len(out[segment.File])
 		out[segment.File] = append(out[segment.File], segment)
 	}
 	return out, scanner.Err()
+}
+
+func blockKey(s Segment) string {
+	return fmt.Sprintf("%s:%d.%d,%d.%d", s.File, s.StartLine, s.StartCol, s.EndLine, s.EndCol)
 }
 
 func Covered(profile map[string][]Segment, file string, line int) bool {
